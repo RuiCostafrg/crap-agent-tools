@@ -1,0 +1,17 @@
+{
+  "name": "crap-agent-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only agent tool: which changed functions are riskiest by CRAP score, and what test evidence is missing. Wraps ts-crap.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./core/analyze.mjs"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
