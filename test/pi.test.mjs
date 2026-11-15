@@ -7,16 +7,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { realScanner, repo } from "./helpers.mjs";
 
-const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "pi", "run.sh");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const runner = path.join(here, "pi", "run.sh");
+const mcpRunner = path.join(here, "pi", "run-mcp.sh");
 const skip = !process.env.PI ? "set PI to the pi executable" : !realScanner ? "needs a real ts-crap (TS_CRAP_TEST_BIN)" : false;
 
-function runPi(root, args, env) {
+function runPi(root, args, env, { script = runner, tool = "changed_risk" } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(runner, [root, JSON.stringify(args)], { env, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(script, [root, JSON.stringify(args)], { env, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) return reject(new Error(`pi failed: ${error.message}\n${stderr}`));
       const events = stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
-      const end = events.find(event => event.type === "tool_execution_end" && event.toolName === "changed_risk");
-      if (!end) return reject(new Error(`changed_risk was never executed:\n${stdout.slice(0, 2000)}`));
+      const end = events.find(event => event.type === "tool_execution_end" && event.toolName === tool);
+      if (!end) return reject(new Error(`${tool} was never executed:\n${stdout.slice(0, 2000)}`));
       resolve(end);
     });
   });
@@ -56,4 +58,17 @@ test("Pi session: the tool loads, runs on the session's repository and returns t
   assert.equal(missing.isError, true);
   assert.equal(missing.result.structuredContent.error.kind, "scanner_not_found");
   assert.match(missing.result.content[0].text, /ts-crap was not found on PATH/);
+});
+
+test("Pi session over MCP: Pi's own MCP client reaches the server and gets the same answer", { skip }, async (t) => {
+  const r = await repo({ "src/price.ts": BASE });
+  await r.write("src/price.ts", CHANGED);
+  t.after(() => r.cleanup());
+  const { NODE_TEST_CONTEXT, ...base } = process.env;
+  const env = { ...base, PI_OFFLINE: "1", CRAP_AGENT_TS_CRAP: realScanner };
+  const direct = await runPi(r.root, { limit: 5 }, env);
+  const viaMcp = await runPi(r.root, { limit: 5 }, env, { script: mcpRunner, tool: "mcp__crap__changed_risk" });
+  assert.equal(viaMcp.isError, false);
+  assert.equal(viaMcp.result.content[0].text, direct.result.content[0].text);
+  assert.deepEqual(viaMcp.result.structuredContent.structuredContent, direct.result.structuredContent);
 });

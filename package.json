@@ -18,5 +18,8 @@
     "extensions": [
       "./pi-extension/index.ts"
     ]
+  },
+  "bin": {
+    "crap-agent-mcp": "./mcp-server/server.mjs"
   }
 }

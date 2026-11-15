@@ -73,13 +73,27 @@ provider (subscription usage limit), so model-driven tool choice is unverified.
 *Correction:* the test must remove `NODE_TEST_CONTEXT` from Pi's environment,
 or Pi, being a Node program, reports to the test runner and the results vanish.
 
-### M3 — MCP server (conditional)
+### M3 — MCP server (conditional) — done
 
 - Same core behind an MCP stdio server.
 - Build only if it stays a thin adapter. Otherwise record why it was skipped.
 
 **Acceptance:** one tool, same result shape as the Pi extension, covered by a
 protocol-level test.
+
+**Status (met):** `mcp-server/server.mjs`, about 110 lines with no dependencies:
+newline-delimited JSON-RPC over stdio, protocol versions 2025-11-25 and
+2025-06-18 (the first with structured tool output), `initialize`, `ping`,
+`tools/list`, `tools/call`, `notifications/cancelled` (aborts the scan and
+sends no reply), at most 4 calls in flight, 1 MiB message cap. It reuses
+`core/surface.mjs` unchanged, so the tool, schemas and text are identical to
+the Pi extension. Project root: `CRAP_AGENT_ROOT` or the directory the client
+starts it in. `test/mcp.test.mjs` drives the real process over pipes;
+`test/pi.test.mjs` also reaches it through Pi's built-in MCP client
+(registered for one session with `pi.registerMcpServer`) and checks the
+answer equals the extension's. *Finding:* Pi gives MCP servers `codemode`
+exposure by default; a server meant to be called directly needs
+`"exposure": "direct"`.
 
 ### M4 — Scanner discovery and README
 
