@@ -17,7 +17,7 @@ async function withFake(files, body) {
   const env = (extra = {}) => ({ ...process.env, PATH: pathWith(fake.bin), FAKE_REPORT: reportFile, FAKE_ARGS_LOG: argsLog, ...extra });
   const analyze = (options = {}, extra) => analyzeChanges({ root: r.root, env: env(extra), ...options });
   const setReport = text => writeFile(reportFile, text);
-  const scannedFiles = async () => { const args = JSON.parse(await readFile(argsLog, "utf8")); return args.slice(args.indexOf("--") + 1); };
+  const scannedFiles = async () => { const args = JSON.parse((await readFile(argsLog, "utf8")).trim().split("\n").at(-1)); return args.slice(args.indexOf("--") + 1); };
   try {
     await body({ r, analyze, setReport, scannedFiles, argsLog, env, fake });
   } finally {
@@ -33,7 +33,8 @@ test("no changed files: empty answer and the scanner is never run on a scan", ()
   assert.deepEqual(answer.functions, []);
   assert.equal(answer.totals.changedFiles, 0);
   assert.equal(answer.omitted, 0);
-  assert.match(answer.notes[0], /No changed TypeScript files/);
+  assert.match(answer.notes[0], /No changed TypeScript or C# files/);
+  assert.deepEqual(answer.scanners, [], "no scanner is even located");
   await assert.rejects(access(argsLog), { code: "ENOENT" });
 }));
 
@@ -54,6 +55,8 @@ test("changed file without changed functions", () => withFake({ "src/a.ts": SAMP
 }));
 
 test("ts-crap missing from PATH", () => withFake({ "src/a.ts": SAMPLE }, async ({ r }) => {
+  assert.deepEqual((await analyzeChanges({ root: r.root, env: { ...process.env, PATH: pathWith() } })).functions, [], "not needed without TypeScript changes");
+  await r.write("src/a.ts", SAMPLE.replace("a + 1", "a + 2"));
   await assert.rejects(analyzeChanges({ root: r.root, env: { ...process.env, PATH: pathWith() } }), failsWith("scanner_not_found"));
   const error = toErrorResult(await analyzeChanges({ root: r.root, env: { ...process.env, PATH: pathWith() } }).catch(e => e));
   assert.equal(error.error.kind, "scanner_not_found");
@@ -62,24 +65,30 @@ test("ts-crap missing from PATH", () => withFake({ "src/a.ts": SAMPLE }, async (
 }));
 
 test("relative and empty PATH entries are never searched", () => withFake({ "src/a.ts": SAMPLE }, async ({ r, fake }) => {
+  await r.write("src/a.ts", SAMPLE.replace("a + 1", "a + 2"));
   const relative = path.relative(r.root, fake.bin);
   await assert.rejects(analyzeChanges({ root: r.root, env: { ...process.env, PATH: ["", relative, pathWith()].join(path.delimiter) } }),
     failsWith("scanner_not_found"));
 }));
 
-test("explicit scanner path and opt-in project scanner", () => withFake({ "src/a.ts": SAMPLE }, async ({ r, fake }) => {
+test("explicit scanner path and opt-in project scanner", () => withFake({ "src/a.ts": SAMPLE }, async ({ r, fake, setReport }) => {
   const env = { ...process.env, PATH: pathWith() };
-  await assert.rejects(analyzeChanges({ root: r.root, env, scannerPath: "ts-crap" }), failsWith("invalid_argument"));
-  await assert.rejects(analyzeChanges({ root: r.root, env, scannerPath: path.join(fake.bin, "missing") }), failsWith("scanner_not_found"));
-  assert.equal((await analyzeChanges({ root: r.root, env, scannerPath: path.join(fake.bin, "ts-crap") })).scanner.version, "2.4.0");
+  await r.write("src/a.ts", SAMPLE.replace("a + 1", "a + 2"));
+  await setReport(report([]));
+  const scannerPaths = file => ({ typescript: file });
+  await assert.rejects(analyzeChanges({ root: r.root, env, scannerPaths: scannerPaths("ts-crap") }), failsWith("invalid_argument"));
+  await assert.rejects(analyzeChanges({ root: r.root, env, scannerPaths: scannerPaths(path.join(fake.bin, "missing")) }), failsWith("scanner_not_found"));
+  assert.equal((await analyzeChanges({ root: r.root, env: { ...env, FAKE_REPORT: path.join(fake.bin, "none") }, scannerPaths: scannerPaths(path.join(fake.bin, "ts-crap")) })
+    .catch(e => e)).kind, "invalid_scanner_output", "the explicit path is the one that runs");
   const [projectBinary] = tsCrap.projectBinaries(r.root);
   await mkdir(path.dirname(projectBinary), { recursive: true });
   await copyFile(path.join(fake.bin, "ts-crap"), projectBinary);
   await assert.rejects(analyzeChanges({ root: r.root, env }), failsWith("scanner_not_found"));
-  assert.equal((await analyzeChanges({ root: r.root, env, allowProjectScanner: true })).scanner.version, "2.4.0");
+  await assert.rejects(analyzeChanges({ root: r.root, env, allowProjectScanner: true }), failsWith("invalid_scanner_output"), "the project binary ran");
 }));
 
-test("old or unrecognised scanner versions are refused", () => withFake({ "src/a.ts": SAMPLE }, async ({ analyze }) => {
+test("old or unrecognised scanner versions are refused", () => withFake({ "src/a.ts": SAMPLE }, async ({ r, analyze }) => {
+  await r.write("src/a.ts", SAMPLE.replace("a + 1", "a + 2"));
   await assert.rejects(analyze({}, { FAKE_VERSION: "ts-crap 2.3.9" }), failsWith("scanner_too_old"));
   await assert.rejects(analyze({}, { FAKE_VERSION: "dotnet-crap 9.0.0" }), failsWith("scanner_unusable"));
 }));
@@ -138,7 +147,9 @@ test("cancellation", () => withFake({ "src/a.ts": SAMPLE }, async ({ analyze }) 
 
 test("invalid arguments", () => withFake({ "src/a.ts": SAMPLE }, async ({ analyze }) => {
   for (const options of [{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { base: "-x" }, { base: "a b" }, { base: "" },
-    { threshold: -1 }, { threshold: Infinity }, { coverage: "../c.json" }, { coverage: "/c.json" }, { scope: "all" }, { root: "relative" }]) {
+    { threshold: -1 }, { threshold: Infinity }, { coverage: "../c.json" }, { coverage: "/c.json" }, { scope: "all" }, { root: "relative" },
+    { language: "rust" }, { language: "TypeScript" }, { coverage: {} }, { coverage: 3 }, { coverage: [] }, { coverage: { python: "c.json" } },
+    { coverage: { csharp: "../c.json" } }, { coverage: { typescript: "" } }]) {
     await assert.rejects(analyze(options), failsWith("invalid_argument"), JSON.stringify(options));
   }
 }));
@@ -167,7 +178,7 @@ test("excluded directories in the diff are never passed to the scanner", () => w
   await setReport(report([{ path: "src/a.ts", name: "simple", line: 1, end_line: 3, complexity: 1, crap: 2 }]));
   const answer = await analyze();
   assert.deepEqual(await scannedFiles(), ["src/a.ts"]);
-  assert.ok(answer.notes.some(note => /2 changed file\(s\) are in directories ts-crap excludes/.test(note)));
+  assert.ok(answer.notes.some(note => /2 changed TypeScript file\(s\) are build, dependency or generated paths ts-crap excludes/.test(note)));
   // A project config replaces the excluded directory names.
   await r.write("ts-crap.json", JSON.stringify({ version: 1, excluded_directories: ["node_modules", "gen"] }));
   await r.write("gen/g.ts", "export const g = () => 1;\n");
@@ -276,13 +287,14 @@ const sha256 = text => createHash("sha256").update(text).digest("hex");
 test("real ts-crap: uncommitted edit, coverage evidence and stale coverage", real, async () => {
   const r = await repo({ "src/a.ts": SAMPLE });
   try {
-    const options = { root: r.root, scannerPath: realScanner, env: { ...process.env, PATH: pathWith() } };
+    const options = { root: r.root, scannerPaths: { typescript: realScanner }, env: { ...process.env, PATH: pathWith() } };
     const edited = SAMPLE.replace('"x"', '"z"');
     await r.write("src/a.ts", edited);
     const bare = await analyzeChanges(options);
     assert.deepEqual(bare.functions.map(item => [item.name, item.line, item.complexity, item.crap, item.failsGate, item.evidence]),
       [["branchy", 5, 7, 56, true, "not_measured"]]);
-    assert.equal(bare.threshold, 10);
+    assert.equal(bare.scanners[0].threshold, 10);
+    assert.equal(bare.functions[0].language, "typescript");
     await r.write("coverage/cov.json", JSON.stringify({ version: 1, files: { "src/a.ts": { sha256: sha256(edited), lines: { 2: 1, 6: 3, 7: 0, 8: 0, 11: 2 } } } }));
     const covered = await analyzeChanges({ ...options, coverage: "coverage/cov.json" });
     const [item] = covered.functions;
@@ -301,7 +313,7 @@ test("real ts-crap: uncommitted edit, coverage evidence and stale coverage", rea
 test("real ts-crap: committed branch changes, excluded and unparsable files", real, async () => {
   const r = await repo({ "src/a.ts": SAMPLE });
   try {
-    const options = { root: r.root, scannerPath: realScanner, env: { ...process.env, PATH: pathWith() } };
+    const options = { root: r.root, scannerPaths: { typescript: realScanner }, env: { ...process.env, PATH: pathWith() } };
     r.git("checkout", "-q", "-b", "feature");
     await r.write("src/a.ts", SAMPLE.replace("a + 1", "a > 0 ? a : -a"));
     r.commit();
@@ -310,7 +322,7 @@ test("real ts-crap: committed branch changes, excluded and unparsable files", re
     const answer = await analyzeChanges({ ...options, base: "main" });
     assert.deepEqual(answer.functions.map(item => [item.name, item.complexity]), [["simple", 2]]);
     assert.deepEqual(answer.syntaxErrors, [{ path: "src/broken.ts", line: 1, column: 1 }]);
-    assert.equal(answer.gate.completenessFailed, true);
+    assert.equal(answer.scanners[0].completenessFailed, true);
     assert.ok(answer.notes.some(note => /do not parse/.test(note)));
     assert.ok(answer.notes.some(note => /excludes/.test(note)));
     assert.deepEqual(await analyzeChanges({ ...options, base: "main" }), answer);

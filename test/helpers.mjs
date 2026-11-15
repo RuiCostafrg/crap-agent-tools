@@ -10,6 +10,8 @@ if (!gitPath) throw new Error("Tests need git on PATH.");
 
 /** The real scanner for end-to-end tests: TS_CRAP_TEST_BIN, else ts-crap on PATH, else null (tests skip). */
 export const realScanner = process.env.TS_CRAP_TEST_BIN || (await findOnPath("ts-crap"));
+/** The real dotnet-crap: DOTNET_CRAP_TEST_BIN, else dotnet-crap on PATH, else null (tests skip). */
+export const realDotnetScanner = process.env.DOTNET_CRAP_TEST_BIN || (await findOnPath("dotnet-crap"));
 
 /** A PATH holding git and node but no ts-crap, plus any extra directories first. */
 export function pathWith(...directories) {
@@ -44,27 +46,35 @@ export async function repo(files = {}) {
 }
 
 /**
- * A fake `ts-crap` in its own directory. Behaviour comes from environment variables:
- * FAKE_VERSION (default "ts-crap 2.4.0"), FAKE_REPORT (file whose bytes are printed),
- * FAKE_EXIT, FAKE_STDERR, FAKE_SLEEP_MS, FAKE_ARGS_LOG (file that receives the scan arguments).
+ * A fake scanner in its own directory. Behaviour comes from environment variables
+ * named with `prefix`: VERSION (default "<name> <version>"), REPORT (file whose bytes
+ * are printed), EXIT, STDERR, SLEEP_MS, ARGS_LOG (file that receives the scan
+ * arguments), SYNTAX (a path: when it is among the arguments, fail the way
+ * dotnet-crap does on invalid C#).
  */
-export async function fakeScanner() {
+export async function fakeScanner({ name = "ts-crap", version = "2.4.0", prefix = "FAKE_" } = {}) {
   const bin = await tempDir("crap-agent-fake-");
   const script = `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] === "--version") { process.stdout.write((process.env.FAKE_VERSION ?? "ts-crap 2.4.0") + "\\n"); process.exit(0); }
-if (process.env.FAKE_ARGS_LOG) fs.writeFileSync(process.env.FAKE_ARGS_LOG, JSON.stringify(args));
+const env = key => process.env["${prefix}" + key];
+if (args[0] === "--version") { process.stdout.write((env("VERSION") ?? "${name} ${version}") + "\\n"); process.exit(0); }
+if (env("ARGS_LOG")) fs.appendFileSync(env("ARGS_LOG"), JSON.stringify(args) + "\\n");
 const finish = () => {
-  if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR + "\\n");
-  if (process.env.FAKE_REPORT && fs.existsSync(process.env.FAKE_REPORT)) process.stdout.write(fs.readFileSync(process.env.FAKE_REPORT));
-  process.exitCode = Number(process.env.FAKE_EXIT ?? 0);
+  if (env("SYNTAX") && args.includes(env("SYNTAX"))) {
+    process.stderr.write("error: invalid C# syntax in " + env("SYNTAX") + "\\n");
+    process.exitCode = 2;
+    return;
+  }
+  if (env("STDERR")) process.stderr.write(env("STDERR") + "\\n");
+  if (env("REPORT") && fs.existsSync(env("REPORT"))) process.stdout.write(fs.readFileSync(env("REPORT")));
+  process.exitCode = Number(env("EXIT") ?? 0);
 };
-const sleep = Number(process.env.FAKE_SLEEP_MS ?? 0);
+const sleep = Number(env("SLEEP_MS") ?? 0);
 if (sleep) setTimeout(finish, sleep); else finish();
 `;
-  await writeFile(path.join(bin, "ts-crap"), script);
-  await chmod(path.join(bin, "ts-crap"), 0o755);
+  await writeFile(path.join(bin, name), script);
+  await chmod(path.join(bin, name), 0o755);
   return { bin, cleanup: () => rm(bin, { recursive: true, force: true }) };
 }
 
@@ -76,6 +86,17 @@ export function report(functions, extra = {}) {
   return JSON.stringify({
     version: 1, threshold: 10, files_scanned: new Set(rows.map(row => row.path)).size, failed: rows.some(row => row.failed),
     files_missing_coverage: 0, functions_missing_coverage: 0, completeness_failed: false, functions: rows, ...extra,
+  });
+}
+
+/** A dotnet-crap 0.1.0 report for the given rows (`file` paths); failed follows the threshold. */
+export function dotnetReport(functions, extra = {}) {
+  const threshold = extra.threshold ?? 10;
+  const rows = functions.map(row => ({ kind: "method_declaration", column: 5, coverage: null, ...row }));
+  return JSON.stringify({
+    threshold, files_scanned: new Set(rows.map(row => row.file)).size,
+    coverage_complete: rows.every(row => row.coverage !== null), functions: rows,
+    failed: rows.some(row => row.crap > threshold), ...extra,
   });
 }
 

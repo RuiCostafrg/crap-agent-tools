@@ -126,10 +126,44 @@ minimum, because `node --test` with a glob needs it; `engines` says so.
 
 **Acceptance:** a short design section; no second scanner is built.
 
-**Status (met):** README "Extension points" lists the adapter's members, the
+**Status (met; the scanner half was then built as M6):** README "Extension points" lists the adapter's members, the
 function-row roles a `dotnet-crap` adapter maps onto, and where mutation
 evidence would enter (`parseReport` rows, a new evidence kind, additive
 schema). No second scanner and no mutation parsing were built.
+
+### M6 — C# through dotnet-crap — done
+
+Added 2026-11-15 at the owner's request (M5 had left it as design only).
+
+- `core/dotnet-crap.mjs`: an adapter of the M5 shape for dotnet-crap 0.1.0+.
+- The core runs every scanner whose language has changed files and merges
+  their functions into one ranking.
+- New arguments `language` and per-language `coverage`. Result schema v2:
+  `scanners[]` replaces `scanner`, `threshold`, `gate` and `coverageSupplied`.
+  Rows gain `language`.
+
+**Acceptance:** fake-scanner tests for report parsing, retry, exclusions and
+mixed diffs; real dotnet-crap end to end; a Pi session over MCP that scores a
+mixed TypeScript and C# change.
+
+**Status (met):** `test/dotnet.test.mjs` (6 tests, 2 against the real
+binaries) and the Pi MCP session test; full suite 36/36 with real ts-crap
+2.4.0, dotnet-crap 0.1.0 and Pi 1.5.2. *Findings, checked against dotnet-crap
+0.1.0:*
+
+- The report has no version field and no per-function gate result. The
+  adapter computes `crap > threshold` and refuses a report whose `failed`
+  disagrees.
+- Per-function coverage is `null` when no coverage point lies inside the
+  function. That surfaces as the new evidence kind `no_function_coverage`.
+- Invalid C# stops the whole scan (exit 2), so the core rescans without the
+  named file (at most 10 times) and lists it under `syntaxErrors` without a
+  line number.
+- `bin/`, `obj/`, `.git/` and `*.g.cs`, `*.generated.cs`, `*.designer.cs`
+  are skipped silently by the scanner; the tool filters and counts them.
+- There is no project configuration file; the threshold defaults to 10.
+- Scanners are located lazily: a missing dotnet-crap matters only when C#
+  files changed. For a mixed diff, the error's hint suggests `language`.
 
 ## Out of scope
 
