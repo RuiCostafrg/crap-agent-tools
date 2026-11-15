@@ -139,6 +139,11 @@ schema). No second scanner and no mutation parsing were built.
 
 ## Decisions for the owner
 
-1. Final name.
-2. Own repository, or a package inside `typescript-crap`.
-3. Whether to keep the MCP surface.
+Decided 2026-11-15:
+
+1. Name: **crap-agent-tools**, kept.
+2. Repository: its own, public at RuiCostafrg/crap-agent-tools. It covers
+   both TypeScript (ts-crap) and C# (dotnet-crap), so it does not live inside
+   either scanner's repository.
+3. MCP surface: **kept**.
+4. License: **MIT**.
