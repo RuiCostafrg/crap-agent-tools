@@ -1,0 +1,26 @@
+# Not pushed anywhere yet. Runs the core and MCP tests, and the real-scanner
+# tests against the pinned typescript-crap platform binary from npm.
+name: test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Fetch ts-crap 2.4.0 (outside the project)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ts-crap"
+          npm install --prefix "$RUNNER_TEMP/ts-crap" --no-save --ignore-scripts typescript-crap@2.4.0
+          echo "TS_CRAP_TEST_BIN=$RUNNER_TEMP/ts-crap/node_modules/typescript-crap-linux-x64/bin/ts-crap" >> "$GITHUB_ENV"
+      - run: '"$TS_CRAP_TEST_BIN" --version'
+      - run: npm test
