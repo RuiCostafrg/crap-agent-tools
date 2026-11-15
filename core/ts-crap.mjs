@@ -1,44 +1,20 @@
 // Scanner adapter for ts-crap (https://github.com/RuiCostafrg/typescript-crap).
 // Everything specific to one scanner lives here: which files it accepts, how it
 // is invoked, and how its JSON report and coverage input are read. A second
-// scanner with the same report roles is another object of this shape.
-import { open } from "node:fs/promises";
+// scanner with the same report roles is another object of this shape
+// (see dotnet-crap.mjs).
 import path from "node:path";
 import { ToolError } from "./exec.mjs";
+import { invalidReport, isCount, isLine, isPath, isScore, parseObject, readBounded, readNativeCoverage } from "./adapter-util.mjs";
 
 const SOURCE = /\.(?:ts|tsx|mts|cts)$/;
 const DECLARATION = /\.d\.(?:ts|mts|cts)$/;
 const DEFAULT_EXCLUDED = ["node_modules", ".git", "target", "dist", "build", "coverage"];
 const MAX_CONFIG_BYTES = 1024 * 1024;
-const MAX_COVERAGE_BYTES = 64 * 1024 * 1024;
-
-/** Read a whole regular file, or null when it is missing, too large or unreadable. */
-async function readBounded(file, maxBytes) {
-  let handle;
-  try {
-    handle = await open(file, "r");
-    const info = await handle.stat();
-    if (!info.isFile() || info.size > maxBytes) return null;
-    return await handle.readFile("utf8");
-  } catch {
-    return null;
-  } finally {
-    await handle?.close();
-  }
-}
-
-function invalid(reason) {
-  return new ToolError("invalid_scanner_output", `ts-crap produced a report this tool cannot trust: ${reason}.`);
-}
-
-const isCount = value => Number.isSafeInteger(value) && value >= 0;
-const isLine = value => Number.isSafeInteger(value) && value >= 1;
-const isScore = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
-// Root-relative slash path, as the report schema defines it.
-const isPath = value => typeof value === "string" && value.length > 0 && !/[\\:]/.test(value) &&
-  !value.split("/").some(part => part === "" || part === "." || part === "..");
+const invalid = reason => invalidReport("ts-crap", reason);
 
 export const tsCrap = {
+  id: "typescript",
   name: "ts-crap",
   command: "ts-crap",
   language: "TypeScript",
@@ -75,6 +51,10 @@ export const tsCrap = {
     return DEFAULT_EXCLUDED;
   },
 
+  /** A file of this language that can hold functions (declaration files cannot). */
+  isSource: file => SOURCE.test(file) && !DECLARATION.test(file),
+
+  /** Whether the scanner accepts the source file; false means it is excluded. */
   selects(file, excludedDirectories) {
     if (!SOURCE.test(file) || DECLARATION.test(file)) return false;
     return !file.split("/").slice(0, -1).some(part => excludedDirectories.includes(part));
@@ -92,9 +72,7 @@ export const tsCrap = {
 
   /** Validate a JSON report (schema report-v1) and return only the fields this tool uses. */
   parseReport(text) {
-    let report;
-    try { report = JSON.parse(text); } catch { throw invalid("the output is not valid JSON"); }
-    if (report === null || typeof report !== "object" || Array.isArray(report)) throw invalid("the report is not a JSON object");
+    const report = parseObject("ts-crap", text);
     if (report.version !== 1) {
       throw new ToolError("unsupported_report_version",
         `ts-crap wrote report version ${JSON.stringify(report.version) ?? "undefined"}; this tool reads version 1 only.`,
@@ -122,7 +100,7 @@ export const tsCrap = {
       if (typeof item.failed !== "boolean") throw invalid(`${at}.failed must be a boolean`);
       return {
         path: item.path, name: item.name, line: item.line, column: item.column, endLine: item.end_line,
-        complexity: item.complexity, coverage: item.coverage, crap: item.crap, failed: item.failed,
+        complexity: item.complexity, coverage: item.coverage, coverageMeasured: true, crap: item.crap, failed: item.failed,
       };
     });
     const listed = report.syntax_errors ?? [];
@@ -137,25 +115,9 @@ export const tsCrap = {
     return { threshold: report.threshold, failed: report.failed, completenessFailed: report.completeness_failed, functions, syntaxErrors };
   },
 
-  /**
-   * Line hits from a native coverage file (schema coverage-v1) that the scanner
-   * has already accepted: Map of path to Map of line to hits. Null when the file
-   * cannot be read here, in which case evidence is stated from the report alone.
-   */
-  async readCoverage(file) {
-    const text = await readBounded(file, MAX_COVERAGE_BYTES);
-    try {
-      const files = JSON.parse(text ?? "null")?.files;
-      if (files === null || typeof files !== "object") return null;
-      const coverage = new Map();
-      for (const [name, entry] of Object.entries(files)) {
-        const lines = new Map();
-        for (const [line, hits] of Object.entries(entry?.lines ?? {})) lines.set(Number(line), hits);
-        coverage.set(name, lines);
-      }
-      return coverage;
-    } catch {
-      return null;
-    }
-  },
+  /** Line hits from the native coverage-v1 file, or null. */
+  readCoverage: readNativeCoverage,
+
+  /** ts-crap reports unparsable files itself (--on-syntax-error report). */
+  syntaxErrorPath: () => null,
 };

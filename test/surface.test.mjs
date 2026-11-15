@@ -7,14 +7,15 @@ import { RESULT_SCHEMA } from "../core/analyze.mjs";
 test("operator configuration comes only from the environment", () => {
   assert.deepEqual(operatorConfig({}), {});
   assert.deepEqual(operatorConfig({ CRAP_AGENT_TS_CRAP: "/opt/ts-crap", CRAP_AGENT_ALLOW_PROJECT_SCANNER: "1", CRAP_AGENT_TIMEOUT_MS: "5000" }),
-    { scannerPath: "/opt/ts-crap", allowProjectScanner: true, timeoutMs: 5000 });
+    { scannerPaths: { typescript: "/opt/ts-crap" }, allowProjectScanner: true, timeoutMs: 5000 });
+  assert.deepEqual(operatorConfig({ CRAP_AGENT_TS_CRAP: "/a", CRAP_AGENT_DOTNET_CRAP: "/b" }), { scannerPaths: { typescript: "/a", csharp: "/b" } });
   assert.deepEqual(operatorConfig({ CRAP_AGENT_ALLOW_PROJECT_SCANNER: "yes" }), {});
 });
 
 test("tool arguments cannot reach operator settings or unknown options", async () => {
   let seen;
   const analyze = async options => { seen = options; return { schema: RESULT_SCHEMA, error: { kind: "x", message: "stub" } }; };
-  for (const args of [{ scannerPath: "/bin/sh" }, { root: "/" }, { allowProjectScanner: true }, { env: {} }]) {
+  for (const args of [{ scannerPath: "/bin/sh" }, { scannerPaths: { csharp: "/bin/sh" } }, { root: "/" }, { allowProjectScanner: true }, { env: {} }]) {
     seen = undefined;
     const result = await callTool(args, { root: "/repo", env: {}, analyze });
     assert.equal(result.isError, true);
@@ -26,18 +27,19 @@ test("tool arguments cannot reach operator settings or unknown options", async (
 
 test("accepted arguments, root and configuration reach the core", async () => {
   let seen;
-  const answer = { schema: RESULT_SCHEMA, scanner: { name: "ts-crap", version: "2.4.0" }, base: "main", mergeBase: "abc", scope: "changed",
-    threshold: 8, gate: { failed: false, completenessFailed: false },
-    totals: { changedFiles: 0, functionsInChangedFiles: 0, changedFunctions: 0, failingChangedFunctions: 0, failingOtherFunctions: 0 },
-    coverageSupplied: false, functions: [], omitted: 0, syntaxErrors: [], notes: [] };
+  const answer = { schema: RESULT_SCHEMA, base: "main", mergeBase: "abc", scope: "changed", language: "auto",
+    scanners: [{ language: "typescript", name: "ts-crap", version: "2.4.0", threshold: 8, changedFiles: 1, coverageSupplied: false, gateFailed: false, completenessFailed: false }],
+    totals: { changedFiles: 1, functionsInChangedFiles: 0, changedFunctions: 0, failingChangedFunctions: 0, failingOtherFunctions: 0 },
+    functions: [], omitted: 0, syntaxErrors: [], notes: [] };
   const analyze = async options => { seen = options; return answer; };
-  const result = await callTool({ base: "main", limit: 3, threshold: 8, coverage: "c.json", scope: "files" },
+  const result = await callTool({ base: "main", limit: 3, threshold: 8, coverage: { typescript: "c.json" }, scope: "files", language: "typescript" },
     { root: "/repo", env: { CRAP_AGENT_TS_CRAP: "/opt/ts-crap" }, analyze });
   assert.equal(result.isError, false);
   assert.equal(result.structured, answer);
-  assert.match(result.text, /^ts-crap 2\.4\.0; base main/);
+  assert.match(result.text, /^ts-crap 2\.4\.0 \(TypeScript, threshold 8, coverage not supplied\); base main/);
   assert.deepEqual({ ...seen, env: undefined, signal: undefined },
-    { root: "/repo", base: "main", limit: 3, threshold: 8, coverage: "c.json", scope: "files", scannerPath: "/opt/ts-crap", env: undefined, signal: undefined });
+    { root: "/repo", base: "main", limit: 3, threshold: 8, coverage: { typescript: "c.json" }, scope: "files", language: "typescript",
+      scannerPaths: { typescript: "/opt/ts-crap" }, env: undefined, signal: undefined });
   assert.deepEqual((await callTool(undefined, { root: "/repo", env: {}, analyze })).structured, answer);
 });
 
@@ -50,6 +52,6 @@ test("thrown errors become error results, never exceptions", async () => {
 
 test("schemas are closed on input and name every argument", () => {
   assert.equal(INPUT_SCHEMA.additionalProperties, false);
-  assert.deepEqual(Object.keys(INPUT_SCHEMA.properties), ["base", "limit", "threshold", "coverage", "scope"]);
+  assert.deepEqual(Object.keys(INPUT_SCHEMA.properties), ["base", "limit", "threshold", "coverage", "language", "scope"]);
   assert.equal(OUTPUT_SCHEMA.properties.schema.const, RESULT_SCHEMA);
 });

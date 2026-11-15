@@ -1,11 +1,12 @@
 // End to end in a real Pi session, driven by a scripted model (no network).
-// Runs only when PI names the pi executable and a real ts-crap is available.
+// Runs only when PI names the pi executable and a real ts-crap is available;
+// the MCP test adds a C# change when a real dotnet-crap is available too.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { realScanner, repo } from "./helpers.mjs";
+import { realDotnetScanner, realScanner, repo } from "./helpers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const runner = path.join(here, "pi", "run.sh");
@@ -40,10 +41,10 @@ test("Pi session: the tool loads, runs on the session's repository and returns t
   const ok = await runPi(r.root, { limit: 5 }, env);
   assert.equal(ok.isError, false);
   const answer = ok.result.structuredContent;
-  assert.equal(answer.schema, "crap-agent-tools/changed-risk/v1");
+  assert.equal(answer.schema, "crap-agent-tools/changed-risk/v2");
   assert.deepEqual(answer.functions.map(f => [f.path, f.name, f.line, f.complexity, f.crap, f.failsGate, f.evidence]),
     [["src/price.ts", "price", 1, 5, 30, true, "not_measured"]]);
-  assert.match(ok.result.content[0].text, /^ts-crap \d+\.\d+\.\d+; base HEAD/);
+  assert.match(ok.result.content[0].text, /^ts-crap \d+\.\d+\.\d+ \(TypeScript, threshold 10, coverage not supplied\); base HEAD/);
   assert.match(ok.result.content[0].text, /1\. FAIL src\/price\.ts:1 price - CRAP 30/);
 
   const unknown = await runPi(r.root, { limit: 5, root: "/" }, env);
@@ -60,15 +61,22 @@ test("Pi session: the tool loads, runs on the session's repository and returns t
   assert.match(missing.result.content[0].text, /ts-crap was not found on PATH/);
 });
 
+const CS_BASE = "namespace Demo;\n\npublic class Calc\n{\n    public int Price(int qty)\n    {\n        return qty * 10;\n    }\n}\n";
+const CS_CHANGED = CS_BASE.replace("        return qty * 10;\n", "        if (qty > 10) return qty * 9;\n        return qty * 10;\n");
+
 test("Pi session over MCP: Pi's own MCP client reaches the server and gets the same answer", { skip }, async (t) => {
-  const r = await repo({ "src/price.ts": BASE });
+  const r = await repo({ "src/price.ts": BASE, "src/Calc.cs": CS_BASE });
   await r.write("src/price.ts", CHANGED);
+  if (realDotnetScanner) await r.write("src/Calc.cs", CS_CHANGED);
   t.after(() => r.cleanup());
   const { NODE_TEST_CONTEXT, ...base } = process.env;
-  const env = { ...base, PI_OFFLINE: "1", CRAP_AGENT_TS_CRAP: realScanner };
+  const env = { ...base, PI_OFFLINE: "1", CRAP_AGENT_TS_CRAP: realScanner, ...(realDotnetScanner ? { CRAP_AGENT_DOTNET_CRAP: realDotnetScanner } : {}) };
   const direct = await runPi(r.root, { limit: 5 }, env);
   const viaMcp = await runPi(r.root, { limit: 5 }, env, { script: mcpRunner, tool: "mcp__crap__changed_risk" });
   assert.equal(viaMcp.isError, false);
   assert.equal(viaMcp.result.content[0].text, direct.result.content[0].text);
   assert.deepEqual(viaMcp.result.structuredContent.structuredContent, direct.result.structuredContent);
+  if (realDotnetScanner) {
+    assert.deepEqual(direct.result.structuredContent.functions.map(f => [f.language, f.name, f.crap]), [["typescript", "price", 30], ["csharp", "Price", 6]]);
+  }
 });

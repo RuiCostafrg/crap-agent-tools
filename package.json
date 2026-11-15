@@ -2,8 +2,8 @@
   "name": "crap-agent-tools",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only agent tool: which changed functions are riskiest by CRAP score, and what test evidence is missing. Wraps ts-crap.",
-  "license": "UNLICENSED",
+  "description": "Read-only agent tool: which changed TypeScript and C# functions are riskiest by CRAP score, and what tests are missing. Wraps ts-crap and dotnet-crap; Pi extension and MCP server.",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -22,5 +22,19 @@
   },
   "bin": {
     "crap-agent-mcp": "./mcp-server/server.mjs"
+  },
+  "keywords": [
+    "crap",
+    "code-quality",
+    "coverage",
+    "typescript",
+    "csharp",
+    "dotnet",
+    "mcp",
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RuiCostafrg/crap-agent-tools.git"
   }
 }

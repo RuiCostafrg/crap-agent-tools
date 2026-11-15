@@ -1,14 +1,17 @@
 // "Which functions I just changed are riskiest, and what tests are missing?"
-// Runs the scanner on the files changed since a base commit and answers with a
-// ranked, bounded, deterministic list of the changed functions.
+// Runs each scanner whose language has files changed since a base commit and
+// answers with one ranked, bounded, deterministic list of the changed functions.
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { ToolError, checkAbort, cleanText, run } from "./exec.mjs";
 import { changedFiles } from "./git.mjs";
 import { locateScanner } from "./scanner.mjs";
 import { tsCrap } from "./ts-crap.mjs";
+import { dotnetCrap } from "./dotnet-crap.mjs";
 
-export const RESULT_SCHEMA = "crap-agent-tools/changed-risk/v1";
+export const RESULT_SCHEMA = "crap-agent-tools/changed-risk/v2";
+/** Scanners in a fixed order: the order of `scanners` in every answer. */
+export const ADAPTERS = [tsCrap, dotnetCrap];
 export const DEFAULT_LIMIT = 10;
 export const MAX_LIMIT = 50;
 export const MAX_RESULT_BYTES = 24 * 1024;
@@ -19,8 +22,13 @@ const MAX_LISTED_LINES = 8;
 const MAX_SYNTAX_ERRORS = 10;
 const SCOPES = ["changed", "files"];
 
-function validate(options) {
-  const { root, base = "HEAD", limit = DEFAULT_LIMIT, threshold, coverage, scope = "changed", timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+function validCoveragePath(value) {
+  return typeof value === "string" && value && value.length <= 500 && !path.isAbsolute(value) &&
+    !value.split(/[\\/]/).includes("..") && !/\p{Cc}/u.test(value);
+}
+
+function validate(options, adapters) {
+  const { root, base = "HEAD", limit = DEFAULT_LIMIT, threshold, coverage, scope = "changed", language = "auto", timeoutMs = DEFAULT_TIMEOUT_MS } = options;
   const fail = message => { throw new ToolError("invalid_argument", message); };
   if (typeof root !== "string" || !path.isAbsolute(root)) fail("root must be an absolute path.");
   if (typeof base !== "string" || !base || base.length > 200 || base.startsWith("-") || /[\p{Cc}\s]/u.test(base)) {
@@ -30,15 +38,20 @@ function validate(options) {
   if (threshold !== undefined && (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0)) {
     fail("threshold must be a finite nonnegative number.");
   }
+  const ids = adapters.map(adapter => adapter.id);
   if (coverage !== undefined) {
-    if (typeof coverage !== "string" || !coverage || coverage.length > 500 || path.isAbsolute(coverage) ||
-        coverage.split(/[\\/]/).includes("..") || /\p{Cc}/u.test(coverage)) {
-      fail("coverage must be a path relative to the project root, without '..'.");
+    const coverageHelp = `coverage must be a path relative to the project root, without '..', or an object mapping ${ids.join(" and ")} to such paths.`;
+    if (typeof coverage === "string") {
+      if (!validCoveragePath(coverage)) fail(coverageHelp);
+    } else if (coverage === null || typeof coverage !== "object" || Array.isArray(coverage) || !Object.keys(coverage).length ||
+        Object.entries(coverage).some(([key, value]) => !ids.includes(key) || !validCoveragePath(value))) {
+      fail(coverageHelp);
     }
   }
   if (!SCOPES.includes(scope)) fail(`scope must be one of: ${SCOPES.join(", ")}.`);
+  if (language !== "auto" && !ids.includes(language)) fail(`language must be one of: auto, ${ids.join(", ")}.`);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 600_000) fail("timeoutMs must be from 1000 to 600000.");
-  return { root, base, limit, threshold, coverage, scope, timeoutMs };
+  return { root, base, limit, threshold, coverage, scope, language, timeoutMs };
 }
 
 async function projectRoot(root) {
@@ -119,6 +132,9 @@ function describeEvidence(item, { coverageSupplied, coverageMap, changedLines, n
   } else if (coverageMap && !fileLines) {
     kind = "no_file_coverage";
     statement = "The coverage data has no entry for this file: no test loaded it.";
+  } else if (item.coverageMeasured === false) {
+    kind = "no_function_coverage";
+    statement = "The coverage data has no points inside this function, so it counts as 0% covered.";
   } else if (item.coverage === 0) {
     kind = "uncovered";
     statement = "No test executes this function.";
@@ -154,9 +170,11 @@ const byRisk = (a, b) => Number(b.failed) - Number(a.failed) || b.crap - a.crap 
 const round = (value, places) => Number(value.toFixed(places));
 const bytes = value => Buffer.byteLength(JSON.stringify(value));
 
+const languageName = id => ADAPTERS.find(adapter => adapter.id === id)?.language ?? id;
+
 function scannerError(adapter, result) {
   const message = cleanText(result.stderr.split("\n").find(line => line.trim()) ?? "", 300);
-  if (/coverage SHA256 mismatch|source changed since coverage/i.test(message)) {
+  if (/coverage SHA256 mismatch|source changed since coverage|stale coverage/i.test(message)) {
     return new ToolError("coverage_stale", "The coverage data is older than the source: a changed file no longer matches it.",
       "Collect coverage again after the last edit, then retry.");
   }
@@ -167,33 +185,89 @@ function scannerError(adapter, result) {
 }
 
 /**
+ * Scan `paths` with one scanner. A scanner that stops on the first file it
+ * cannot parse (dotnet-crap) is run again without that file, at most
+ * MAX_SYNTAX_ERRORS times; those files are reported as syntax errors.
+ */
+async function scanFiles({ adapter, scanner, root, paths, coverage, threshold, env, signal, timeoutMs }) {
+  let remaining = [...paths];
+  const unparsable = [];
+  for (;;) {
+    if (!remaining.length) {
+      return { threshold: threshold ?? adapter.defaultThreshold ?? null, failed: false, completenessFailed: true, functions: [], syntaxErrors: unparsable };
+    }
+    let result;
+    try {
+      result = await run(scanner.path, adapter.scanArguments({ root, files: remaining, coverage, threshold }),
+        { cwd: root, env, signal, timeoutMs, maxStdoutBytes: MAX_REPORT_BYTES });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ToolError("scanner_unusable", `${adapter.name} could not be started (${cleanText(error.code ?? error.message, 80)}).`);
+    }
+    if (result.timedOut) {
+      throw new ToolError("scanner_timeout", `${adapter.name} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`,
+        "Use a closer base so fewer files change, or raise the timeout.");
+    }
+    if (result.overflow) throw new ToolError("scanner_output_too_large", `${adapter.name} wrote a report larger than ${MAX_REPORT_BYTES} bytes.`);
+    if (!adapter.hasReport(result.code)) {
+      const bad = adapter.syntaxErrorPath(result.stderr);
+      if (bad && remaining.includes(bad) && unparsable.length < MAX_SYNTAX_ERRORS) {
+        remaining = remaining.filter(file => file !== bad);
+        unparsable.push({ path: bad });
+        continue;
+      }
+      throw scannerError(adapter, result);
+    }
+    const report = adapter.parseReport(result.stdout.toString("utf8"));
+    const selected = new Set(remaining);
+    if (report.functions.some(item => !selected.has(item.path))) {
+      throw new ToolError("invalid_scanner_output", `${adapter.name} reported a function in a file that was not selected.`);
+    }
+    if (unparsable.length) {
+      report.syntaxErrors = [...report.syntaxErrors, ...unparsable];
+      report.completenessFailed = true;
+    }
+    return report;
+  }
+}
+
+/**
  * Analyse the changes under `root` since merge-base(`base`, HEAD), including
  * uncommitted and untracked files. Never writes files or uses the network.
  *
  * Options: root (absolute), base ("HEAD"), limit (10, max 50), threshold,
- * coverage (native coverage JSON relative to root), scope ("changed" | "files"),
- * scannerPath, allowProjectScanner (false), timeoutMs, env, signal.
+ * coverage (native coverage JSON relative to root, or { typescript, csharp }),
+ * scope ("changed" | "files"), language ("auto" | "typescript" | "csharp"),
+ * scannerPaths ({ typescript, csharp }), allowProjectScanner (false), timeoutMs,
+ * env, signal; for tests: adapters, maxBytes.
+ * A scanner is located and run only when its language has changed files.
  * Throws ToolError for expected failures; see `toErrorResult`.
  */
 export async function analyzeChanges(options = {}) {
-  const adapter = options.adapter ?? tsCrap;
+  const adapters = options.adapters ?? ADAPTERS;
   const env = options.env ?? process.env;
   const signal = options.signal;
   const maxBytes = options.maxBytes ?? MAX_RESULT_BYTES;
-  const { base, limit, threshold, coverage, scope, timeoutMs } = validate(options);
+  const { base, limit, threshold, coverage, scope, language, timeoutMs } = validate(options, adapters);
   const root = await projectRoot(options.root);
   checkAbort(signal);
 
-  const scanner = await locateScanner({ adapter, scannerPath: options.scannerPath, root, allowProjectScanner: options.allowProjectScanner, env, signal });
-  const excludedDirectories = await adapter.excludedDirectories(root);
-  let excludedFiles = 0;
+  const inScope = language === "auto" ? adapters : adapters.filter(adapter => adapter.id === language);
+  const excludedDirectories = new Map();
+  for (const adapter of inScope) excludedDirectories.set(adapter, await adapter.excludedDirectories(root));
+  const excluded = new Map(inScope.map(adapter => [adapter, 0]));
+  let otherLanguageFiles = 0;
+  const ownerOf = file => inScope.find(adapter => adapter.isSource(file));
   const diff = await changedFiles({
     root, base, env, signal,
     select(file) {
-      if (adapter.selects(file, [])) {
-        if (adapter.selects(file, excludedDirectories)) return true;
-        excludedFiles++;
+      const adapter = ownerOf(file);
+      if (!adapter) {
+        if (adapters.some(other => other.isSource(file))) otherLanguageFiles++;
+        return false;
       }
+      if (adapter.selects(file, excludedDirectories.get(adapter))) return true;
+      excluded.set(adapter, excluded.get(adapter) + 1);
       return false;
     },
   });
@@ -206,50 +280,71 @@ export async function analyzeChanges(options = {}) {
     skippedFiles++;
   }
   if (files.length > MAX_FILES) {
-    throw new ToolError("diff_too_large", `${files.length} changed ${adapter.language} files exceed the limit of ${MAX_FILES}.`,
+    throw new ToolError("diff_too_large", `${files.length} changed source files exceed the limit of ${MAX_FILES}.`,
       "Use a closer base or analyse a subdirectory.");
   }
-  const coveragePath = coverage === undefined ? undefined : await coverageFile(root, coverage);
+  const groups = inScope.map(adapter => ({ adapter, files: files.filter(file => ownerOf(file.path) === adapter) }))
+    .filter(group => group.files.length);
+
+  // Coverage: one path serves the only language with changes; an object names each language's file.
+  const coverageByLanguage = new Map();
+  if (typeof coverage === "string") {
+    if (groups.length > 1) {
+      throw new ToolError("invalid_argument",
+        `coverage names one file, but the changes span ${groups.map(group => group.adapter.language).join(" and ")}.`,
+        `Pass coverage as an object, for example {"${groups[0].adapter.id}": "...", "${groups[1].adapter.id}": "..."}.`);
+    }
+    coverageByLanguage.set((groups[0]?.adapter ?? inScope[0])?.id, coverage);
+  } else if (coverage) {
+    for (const [id, file] of Object.entries(coverage)) coverageByLanguage.set(id, file);
+  }
+  const coveragePaths = new Map();
+  for (const [id, file] of [...coverageByLanguage].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    coveragePaths.set(id, await coverageFile(root, file));
+  }
   checkAbort(signal);
 
-  let report = { threshold: threshold ?? null, failed: false, completenessFailed: false, functions: [], syntaxErrors: [] };
-  if (files.length) {
-    const args = adapter.scanArguments({ root, files: files.map(file => file.path), coverage: coveragePath, threshold });
-    let result;
+  for (const group of groups) {
+    const { adapter } = group;
     try {
-      result = await run(scanner.path, args, { cwd: root, env, signal, timeoutMs, maxStdoutBytes: MAX_REPORT_BYTES });
+      group.scanner = await locateScanner({
+        adapter, scannerPath: options.scannerPaths?.[adapter.id], root,
+        allowProjectScanner: options.allowProjectScanner, env, signal,
+      });
     } catch (error) {
-      if (signal?.aborted) throw error;
-      throw new ToolError("scanner_unusable", `${adapter.name} could not be started (${cleanText(error.code ?? error.message, 80)}).`);
+      const others = groups.filter(other => other !== group).map(other => other.adapter.id);
+      if (error instanceof ToolError && others.length) {
+        throw new ToolError(error.kind, error.message,
+          `${error.hint ? `${error.hint} ` : ""}Or pass language: "${others[0]}" to analyse only the ${groups.find(g => g.adapter.id === others[0]).adapter.language} changes.`);
+      }
+      throw error;
     }
-    if (result.timedOut) {
-      throw new ToolError("scanner_timeout", `${adapter.name} did not finish within ${Math.round(timeoutMs / 1000)} seconds.`,
-        "Use a closer base so fewer files change, or raise the timeout.");
-    }
-    if (result.overflow) throw new ToolError("scanner_output_too_large", `${adapter.name} wrote a report larger than ${MAX_REPORT_BYTES} bytes.`);
-    if (!adapter.hasReport(result.code)) throw scannerError(adapter, result);
-    report = adapter.parseReport(result.stdout.toString("utf8"));
-    const selected = new Set(files.map(file => file.path));
-    const stray = report.functions.find(item => !selected.has(item.path));
-    if (stray) throw new ToolError("invalid_scanner_output", `${adapter.name} reported a function in a file that was not selected.`);
+    group.coveragePath = coveragePaths.get(adapter.id);
+    group.report = await scanFiles({
+      adapter, scanner: group.scanner, root, paths: group.files.map(file => file.path),
+      coverage: group.coveragePath, threshold, env, signal, timeoutMs,
+    });
+    group.coverageMap = group.coveragePath ? await adapter.readCoverage(group.coveragePath) : null;
   }
-  const effectiveThreshold = report.threshold;
-  const coverageMap = coveragePath ? await adapter.readCoverage(coveragePath) : null;
-  const changed = markChanged(report.functions, files);
+
+  const functions = groups.flatMap(group => group.report.functions.map(item => ({ ...item, group })));
+  const syntaxErrors = groups.flatMap(group => group.report.syntaxErrors);
+  const changed = markChanged(functions, files);
   const fileByPath = new Map(files.map(file => [file.path, file]));
   const isChangedLine = (item) => (line) => {
     const file = fileByPath.get(item.path);
     return !!file && (file.whole || file.ranges.some(([first, last]) => line >= first && line <= last));
   };
 
-  const considered = report.functions.filter(item => scope === "files" || changed.has(item)).sort(byRisk);
+  const considered = functions.filter(item => scope === "files" || changed.has(item)).sort(byRisk);
   const ranked = considered.map((item, index) => {
     const evidence = describeEvidence(item, {
-      coverageSupplied: coveragePath !== undefined, coverageMap, threshold: effectiveThreshold,
-      changedLines: isChangedLine(item), nested: nestedIn(item, report.functions),
+      coverageSupplied: item.group.coveragePath !== undefined, coverageMap: item.group.coverageMap,
+      threshold: item.group.report.threshold, changedLines: isChangedLine(item), nested: nestedIn(item, functions),
     });
     return {
       rank: index + 1,
+      language: item.group.adapter.id,
       path: cleanText(item.path, 200),
       line: item.line,
       endLine: item.endLine,
@@ -266,35 +361,49 @@ export async function analyzeChanges(options = {}) {
     };
   });
 
-  const changedFunctions = report.functions.filter(item => changed.has(item));
+  const changedFunctions = functions.filter(item => changed.has(item));
   const notes = [];
-  if (!files.length) notes.push(`No changed ${adapter.language} files since the base; nothing to score.`);
+  if (!files.length) notes.push(`No changed ${inScope.map(adapter => adapter.language).join(" or ")} files since the base; nothing to score.`);
   else if (!changedFunctions.length) notes.push("The changed files contain no changed functions (only top-level code, types, comments or deletions changed).");
-  if (coveragePath === undefined && files.length) notes.push("Coverage was not supplied: every score assumes 0% coverage. Pass coverage to see which lines tests miss.");
-  const otherFailing = report.functions.filter(item => item.failed && !changed.has(item)).length;
+  for (const group of groups) {
+    if (group.coveragePath === undefined) {
+      notes.push(`Coverage was not supplied for ${group.adapter.language}: every ${group.adapter.language} score assumes 0% coverage. Pass coverage to see which lines tests miss.`);
+    }
+  }
+  const otherFailing = functions.filter(item => item.failed && !changed.has(item)).length;
   if (otherFailing) notes.push(`${otherFailing} unchanged function(s) in the changed files also fail; a CI gate that scores whole changed files will report them.`);
-  if (excludedFiles) notes.push(`${excludedFiles} changed file(s) are in directories ${adapter.name} excludes and were not scored.`);
+  for (const [adapter, count] of excluded) {
+    if (count) notes.push(`${count} changed ${adapter.language} file(s) are build, dependency or generated paths ${adapter.name} excludes and were not scored.`);
+  }
+  if (otherLanguageFiles) notes.push(`${otherLanguageFiles} changed file(s) in other languages were not analysed (language: ${language}).`);
   if (skippedFiles) notes.push(`${skippedFiles} changed path(s) are symbolic links or no longer exist and were not scored.`);
-  if (report.syntaxErrors.length) notes.push(`${report.syntaxErrors.length} changed file(s) do not parse; their functions are missing from this answer.`);
+  if (syntaxErrors.length) notes.push(`${syntaxErrors.length} changed file(s) do not parse; their functions are missing from this answer.`);
 
   const answer = {
     schema: RESULT_SCHEMA,
-    scanner: { name: adapter.name, version: scanner.version },
-    base, mergeBase: diff.mergeBase.slice(0, 12), scope,
-    threshold: effectiveThreshold,
-    gate: { failed: report.failed, completenessFailed: report.completenessFailed },
+    base, mergeBase: diff.mergeBase.slice(0, 12), scope, language,
+    scanners: groups.map(group => ({
+      language: group.adapter.id,
+      name: group.adapter.name,
+      version: group.scanner.version,
+      threshold: group.report.threshold,
+      changedFiles: group.files.length,
+      coverageSupplied: group.coveragePath !== undefined,
+      gateFailed: group.report.failed,
+      completenessFailed: group.report.completenessFailed,
+    })),
     totals: {
       changedFiles: files.length,
-      functionsInChangedFiles: report.functions.length,
+      functionsInChangedFiles: functions.length,
       changedFunctions: changedFunctions.length,
       failingChangedFunctions: changedFunctions.filter(item => item.failed).length,
       failingOtherFunctions: otherFailing,
     },
-    coverageSupplied: coveragePath !== undefined,
     functions: ranked.slice(0, limit),
     omitted: Math.max(0, ranked.length - limit),
-    syntaxErrors: [...report.syntaxErrors].sort(byPathLine).slice(0, MAX_SYNTAX_ERRORS)
-      .map(item => ({ path: cleanText(item.path, 200), line: item.line, column: item.column })),
+    syntaxErrors: [...syntaxErrors].sort((a, b) => byPathLine({ line: 0, column: 0, name: "", ...a }, { line: 0, column: 0, name: "", ...b }))
+      .slice(0, MAX_SYNTAX_ERRORS)
+      .map(item => ({ path: cleanText(item.path, 200), ...(item.line ? { line: item.line, column: item.column } : {}) })),
     notes,
   };
   // The byte bound: drop the lowest-ranked rows until the whole answer fits.
@@ -321,17 +430,18 @@ export function formatAnswer(answer) {
     return `Error (${answer.error.kind}): ${answer.error.message}${answer.error.hint ? `\nHint: ${answer.error.hint}` : ""}`;
   }
   const t = answer.totals;
+  const scanners = answer.scanners.map(s =>
+    `${s.name} ${s.version} (${languageName(s.language)}, threshold ${s.threshold ?? "default"}, coverage ${s.coverageSupplied ? "supplied" : "not supplied"})`);
   const lines = [
-    `${answer.scanner.name} ${answer.scanner.version}; base ${answer.base} (merge base ${answer.mergeBase}); threshold ${answer.threshold ?? "default"}; ` +
-    `coverage ${answer.coverageSupplied ? "supplied" : "not supplied"}.`,
+    `${scanners.length ? scanners.join("; ") : "No scanner ran"}; base ${answer.base} (merge base ${answer.mergeBase}).`,
     `${t.changedFunctions} changed function(s) in ${t.changedFiles} changed file(s); failing the gate: ${t.failingChangedFunctions}. ` +
-    `Gate over the whole changed files: ${answer.gate.failed ? "FAIL" : "pass"}.`,
+    `Gate over the whole changed files: ${answer.scanners.some(s => s.gateFailed) ? "FAIL" : "pass"}.`,
   ];
   for (const item of answer.functions) {
     lines.push(`${item.rank}. ${item.failsGate ? "FAIL" : "ok"} ${item.path}:${item.line} ${item.name}${item.changed ? "" : " (unchanged)"}` +
       ` - CRAP ${item.crap}, complexity ${item.complexity}, coverage ${Math.floor(item.coverage * 100)}%. ${item.missing}`);
   }
-  for (const item of answer.syntaxErrors) lines.push(`Does not parse: ${item.path}:${item.line}:${item.column}`);
+  for (const item of answer.syntaxErrors) lines.push(`Does not parse: ${item.path}${item.line ? `:${item.line}:${item.column}` : ""}`);
   for (const note of answer.notes) lines.push(`Note: ${note}`);
   return lines.join("\n");
 }
