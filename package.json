@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "exports": {
     ".": "./core/analyze.mjs"
@@ -17,7 +17,8 @@
   "pi": {
     "extensions": [
       "./pi-extension/index.ts"
-    ]
+    ],
+    "changelogPath": ""
   },
   "bin": {
     "crap-agent-mcp": "./mcp-server/server.mjs"

@@ -95,7 +95,7 @@ answer equals the extension's. *Finding:* Pi gives MCP servers `codemode`
 exposure by default; a server meant to be called directly needs
 `"exposure": "direct"`.
 
-### M4 — Scanner discovery and README
+### M4 — Scanner discovery and README — done
 
 - Documented lookup order for the scanner: explicit path, project
   `node_modules`, PATH.
@@ -108,6 +108,16 @@ exposure by default; a server meant to be called directly needs
 - CI workflow file for the tests (not pushed anywhere yet).
 
 **Acceptance:** a stranger can install and remove it from the README alone.
+
+**Status (met):** `README.md` covers what it does and does not do, requirements
+and scanner lookup, arguments and operator variables, Pi (one-off `pi -e`,
+`pi install`, `pi remove`), MCP client configuration and removal, limits,
+privacy and tests. The Pi install and removal steps were run against an
+isolated `PI_CODING_AGENT_DIR`, which also confirmed that the installed package form
+loads the tool; the live configuration was not touched.
+`.github/workflows/test.yml` runs the tests on Node 22 and 24 against the
+pinned npm platform binary (not pushed; never run). *Correction:* Node 22 is the
+minimum, because `node --test` with a glob needs it; `engines` says so.
 
 ### M5 — Extension points (design only)
 
