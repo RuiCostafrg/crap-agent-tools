@@ -147,7 +147,8 @@ mixed diffs; real dotnet-crap end to end; a Pi session over MCP that scores a
 mixed TypeScript and C# change.
 
 **Status (met):** `test/dotnet.test.mjs` (6 tests, 2 against the real
-binaries) and the Pi MCP session test; full suite 36/36 with real ts-crap
+binaries) and the Pi MCP session test; README and CI updated (CI fetches
+dotnet-crap 0.1.0 with a pinned checksum); full suite 36/36 with real ts-crap
 2.4.0, dotnet-crap 0.1.0 and Pi 1.5.2. *Findings, checked against dotnet-crap
 0.1.0:*
 

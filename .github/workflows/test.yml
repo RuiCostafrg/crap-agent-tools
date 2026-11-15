@@ -1,5 +1,5 @@
-# Not pushed anywhere yet. Runs the core and MCP tests, and the real-scanner
-# tests against the pinned typescript-crap platform binary from npm.
+# Runs every test except the Pi sessions, against pinned real scanners:
+# ts-crap from npm and dotnet-crap from its GitHub release (checksum pinned here).
 name: test
 on:
   push:
@@ -23,4 +23,16 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/ts-crap" --no-save --ignore-scripts typescript-crap@2.4.0
           echo "TS_CRAP_TEST_BIN=$RUNNER_TEMP/ts-crap/node_modules/typescript-crap-linux-x64/bin/ts-crap" >> "$GITHUB_ENV"
       - run: '"$TS_CRAP_TEST_BIN" --version'
+      - name: Fetch dotnet-crap 0.1.0 (outside the project)
+        env:
+          ASSET: dotnet-crap-x86_64-unknown-linux-musl
+          SHA256: 3fcc96ee728f497b4c4145c791a2a4ed8a0d7a7a8e99e642f4b572bc60f13dfe
+        run: |
+          dir="$RUNNER_TEMP/dotnet-crap"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/$ASSET.tar.xz" "https://github.com/RuiCostafrg/dotnet-crap/releases/download/v0.1.0/$ASSET.tar.xz"
+          echo "$SHA256  $dir/$ASSET.tar.xz" | sha256sum -c -
+          tar -xJf "$dir/$ASSET.tar.xz" -C "$dir"
+          echo "DOTNET_CRAP_TEST_BIN=$dir/$ASSET/dotnet-crap" >> "$GITHUB_ENV"
+      - run: '"$DOTNET_CRAP_TEST_BIN" --version'
       - run: npm test
