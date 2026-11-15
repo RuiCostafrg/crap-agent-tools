@@ -119,12 +119,17 @@ loads the tool; the live configuration was not touched.
 pinned npm platform binary (not pushed; never run). *Correction:* Node 22 is the
 minimum, because `node --test` with a glob needs it; `engines` says so.
 
-### M5 — Extension points (design only)
+### M5 — Extension points (design only) — done
 
 - A scanner interface that `dotnet-crap` could implement.
 - A place for mutation evidence once `ts-crap` reports it.
 
 **Acceptance:** a short design section; no second scanner is built.
+
+**Status (met):** README "Extension points" lists the adapter's members, the
+function-row roles a `dotnet-crap` adapter maps onto, and where mutation
+evidence would enter (`parseReport` rows, a new evidence kind, additive
+schema). No second scanner and no mutation parsing were built.
 
 ## Out of scope
 

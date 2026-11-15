@@ -218,6 +218,47 @@ with Pi's own faux provider. They make no network calls and need no
 credentials. One test reaches the MCP server through Pi's built-in MCP client,
 registered for that session only.
 
+## Extension points
+
+These are designed but not built. Nothing here depends on unreleased scanner
+features.
+
+### A second scanner (for example `dotnet-crap`)
+
+Everything specific to `ts-crap` lives in one adapter object,
+`core/ts-crap.mjs`. `analyzeChanges({ adapter })` accepts any object of the
+same shape:
+
+| Member | Role |
+|---|---|
+| `name`, `command`, `language`, `installHint` | Names used in messages, and the command name looked up on PATH |
+| `versionArguments`, `parseVersion(text)`, `minimumVersion` | Version check before any scan |
+| `projectBinaries(root)` | Optional project-local executables, used only when allowed |
+| `excludedDirectories(root)`, `selects(file, excluded)` | Which changed files the scanner accepts, so a file it would refuse is never named |
+| `scanArguments({ root, files, coverage, threshold })` | The exact argument vector. No shell is involved |
+| `hasReport(exitCode)` | Which exit codes still carry a report (a gate failure is not a tool failure) |
+| `parseReport(text)` | Validates the report and returns `{ threshold, failed, completenessFailed, functions[], syntaxErrors[] }` |
+| `readCoverage(file)` | Per-line hit counts for the "lines never executed" evidence, or `null` |
+
+Each function row has `path, line, endLine, column, name, complexity,
+coverage, crap, failed`. Those are the report roles `dotnet-crap` shares, so
+its adapter only maps its own report onto them. The diff selection, ranking,
+evidence statements, bound and both surfaces stay as they are. Open
+questions for that adapter: how C# files are matched to projects, and its coverage input
+format. With two adapters, the tool could pick one per changed file
+extension, or take an `adapter` argument. That choice is not made yet.
+
+### Mutation evidence
+
+Once `ts-crap` reports mutation results per function, `parseReport` would add an optional
+`mutation` field to each row, for example `{ killed, survived,
+timedOut }`. `describeEvidence` in `core/analyze.mjs` would then add kinds such as
+`surviving_mutants`. That kind means lines run under test but the assertions miss
+changes, and it would list the surviving mutants on changed lines, bounded like
+`uncoveredLines`. The new fields are additive, so the result schema stays
+`crap-agent-tools/changed-risk/v1`, and ranking stays CRAP first. Until a released
+scanner reports mutation data, nothing reads it.
+
 ## Layout
 
 ```text
