@@ -48,7 +48,7 @@ scanner output and rows naming unselected files are refused; names and paths
 are stripped of control and bidirectional characters; minimum scanner version
 is 2.4.0 (`--on-syntax-error report`).
 
-### M2 — Pi extension
+### M2 — Pi extension — done
 
 - One tool with a small parameter set (base ref, limit, threshold).
 - Structured result plus a short text summary.
@@ -57,6 +57,21 @@ is 2.4.0 (`--on-syntax-error report`).
 **Acceptance:** loads in a real Pi session on this host with `pi -e`, and
 returns a correct answer for a throwaway repository. Nothing is installed
 permanently into the live Pi configuration.
+
+**Status (met):** `pi-extension/index.ts` registers `changed_risk` (parameters
+base, limit, threshold, coverage, scope; read-only annotations; prompt snippet
+and guidelines). Name, description, schemas and argument checks live in
+`core/surface.mjs` so M3 can reuse them. The project root is the session's
+`cwd`; the scanner comes from `CRAP_AGENT_TS_CRAP` or PATH, never from tool
+arguments, which are a closed set. Verified on Pi 1.5.2: `test/pi.test.mjs`
+runs a real `pi --mode json -e …` session (no discovered extensions, no
+context files, no session file, offline) with a scripted model built on Pi's
+own faux provider, and checks the ranked answer, an unknown argument, an
+invalid limit and a missing scanner. A run with the configured real model
+loaded the tool and its guidelines into the system prompt but stopped at the
+provider (subscription usage limit), so model-driven tool choice is unverified.
+*Correction:* the test must remove `NODE_TEST_CONTEXT` from Pi's environment,
+or Pi, being a Node program, reports to the test runner and the results vanish.
 
 ### M3 — MCP server (conditional)
 
